@@ -776,6 +776,8 @@ def _build_app():
         _extras_logs = []
         return {"logs": logs}
 
+    return app
+
 
 async def _stop_automation(phone: str) -> int:
     """Stop a running automation for a phone; return how many it had sent."""
