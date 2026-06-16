@@ -2280,6 +2280,14 @@ async def run_send_remote(owner_id: int, payload: dict):
                                    buttons=main_menu(is_owner_user))
         except Exception:
             pass
+        # update_end #5 (remote): when a worker send ENDS, also offer the
+        # check-account -> confirm/worker-transfer -> continue panel.
+        await _offer_resume_after_send(owner_id, {
+            "account_id": account_id, "phone": phone, "remote": True,
+            "worker_id": w["id"], "recipients": [], "base_ok": ok, "tag": "",
+            "dead": ("blocked" in str(reason)) or ("باطل" in str(reason)),
+            "reason": reason,
+        })
     else:
         await log(card("SEND FINISHED ✅", [
             "🟢 Status : Completed",
@@ -4229,22 +4237,28 @@ async def _offer_resume_after_send(owner_id: int, info: dict):
     phone = info["phone"]
     remaining = info.get("recipients") or []
     dead = info.get("dead")
-    if remaining:
+    is_remote = bool(info.get("remote"))
+    if remaining or is_remote:
         payload = {
             "saved_guid": info.get("saved_guid"), "mid": info.get("mid"),
             "recipients": remaining, "base_ok": int(info.get("base_ok") or 0),
-            "tag": info.get("tag") or "",
+            "tag": info.get("tag") or "", "remote": is_remote,
+            "worker_id": info.get("worker_id"),
         }
         try:
             db.save_paused_send(account_id, owner_id, phone, payload)
         except Exception:
             pass
     rows = []
-    body = [f"📱 {phone}", f"⏳ باقی‌مونده در لیست : {len(remaining)}"]
-    if dead:
-        body.append("🔴 وضعیت: سشن باطل شد")
+    body = [f"📱 {phone}"]
     if remaining:
-        body.append("برای ادامه‌ی همین لیست، اول اکانت رو چک کن.")
+        body.append(f"⏳ باقی‌مونده در لیست : {len(remaining)}")
+    if is_remote:
+        body.append("📡 این اکانت روی ورکر بود؛ بعد از چک، ارسال ادامه/تکرار می‌شه.")
+    if dead:
+        body.append("🔴 وضعیت: احتمال باطل‌شدن/بلاک سشن")
+    if remaining or is_remote:
+        body.append("اول «🔎 چک اکانت» رو بزن، بعد تأیید یا انتقال ورکر.")
         rows.append([Button.inline("🔎 چک اکانت", f"rchk_{account_id}".encode())])
     rows.append([Button.inline("🏠 منوی اصلی", b"home")])
     try:
@@ -4366,27 +4380,117 @@ async def _do_resume(owner_id: int, account_id: int):
             pass
         return
     p = rec["payload"]
+    db.delete_paused_send(account_id)
     recips = p.get("recipients") or []
-    if not recips or not p.get("mid"):
-        db.delete_paused_send(account_id)
+    acc = db.get_account(account_id)
+    w = worker.worker_for_account(acc) if acc else None
+    is_remote_now = bool(w and not worker.is_local(w))
+
+    # 1) precise local resume: exact remaining list AND account is local now
+    if recips and p.get("mid") and not is_remote_now:
+        payload = {
+            "account_id": account_id, "phone": rec["phone"],
+            "saved_guid": p.get("saved_guid"), "mid": p.get("mid"),
+            "recipients": recips, "base_ok": int(p.get("base_ok") or 0),
+            "tag": p.get("tag") or "",
+        }
         try:
-            await bot.send_message(owner_id, "لیست باقی‌مونده خالیه.")
+            await bot.send_message(owner_id,
+                f"▶️ ادامه‌ی ارسال {rec['phone']} از {len(recips)} گیرنده‌ی باقی‌مونده ...")
         except Exception:
             pass
+        asyncio.create_task(run_send(owner_id, payload))
         return
-    db.delete_paused_send(account_id)
-    payload = {
-        "account_id": account_id, "phone": rec["phone"],
-        "saved_guid": p.get("saved_guid"), "mid": p.get("mid"),
-        "recipients": recips, "base_ok": int(p.get("base_ok") or 0),
-        "tag": p.get("tag") or "",
-    }
+
+    # 2) exact list known but the account is now on a REMOTE worker (transfer)
+    #    -> forward exactly those guids on the worker via /send/to_list
+    if recips and is_remote_now:
+        try:
+            await bot.send_message(owner_id,
+                f"▶️ ادامه‌ی لیست روی ورکر «{w['tag']}» ({len(recips)} گیرنده) ...")
+        except Exception:
+            pass
+        asyncio.create_task(_resume_remote_list(owner_id, account_id, recips))
+        return
+
+    # 3) remote (no precise list) -> fresh send routed by the current worker
     try:
-        await bot.send_message(owner_id,
-            f"▶️ ادامه‌ی ارسال {rec['phone']} از {len(recips)} گیرنده‌ی باقی‌مونده ...")
+        await bot.send_message(owner_id, "▶️ ادامه‌ی ارسال ...")
     except Exception:
         pass
-    asyncio.create_task(run_send(owner_id, payload))
+    await _resume_fresh_send(owner_id, account_id)
+
+
+async def _resume_remote_list(owner_id, account_id, guids):
+    acc = db.get_account(account_id)
+    if not acc:
+        return
+    w = worker.worker_for_account(acc)
+    marker = db.get_marker()
+    try:
+        res = await worker.api_call(w, "POST", "/send/to_list", {
+            "phone": acc["phone"], "marker": marker, "guids": guids,
+            "delay": db.get_delay(), "max_errors": db.get_max_errors(),
+            "send_timeout": config.SEND_TIMEOUT}, timeout=14400)
+        ok = res.get("ok", 0)
+        fail = res.get("fail", 0)
+        await log(card("✅ ادامه‌ی ارسال (ورکر) تمام شد", [
+            f"📱 {acc['phone']}", f"👨‍🔧 {w['tag']}",
+            f"✅ {ok}   ❌ {fail}", f"🕒 {now()}"]))
+        await bot.send_message(owner_id, f"✅ ادامه تمام شد. ✅ {ok} / ❌ {fail}",
+                               buttons=main_menu(owner_id == config.OWNER_ID))
+    except Exception as e:  # noqa: BLE001
+        await log(card("⚠️ ادامه‌ی ارسال ورکر — خطا", [
+            f"📱 {acc['phone']}", f"💥 {repr(e)[:140]}"]))
+
+
+async def _resume_fresh_send(owner_id, account_id):
+    acc = db.get_account(account_id)
+    if not acc:
+        return
+    marker = db.get_marker()
+    w = worker.worker_for_account(acc)
+    if w and not worker.is_local(w):
+        try:
+            await worker.check_worker(w)
+        except Exception:
+            pass
+        w = db.get_worker(w["id"])
+        if not (w and w["enabled"] and w["status"] == "ok"):
+            await bot.send_message(owner_id, "❌ ورکر این اکانت الان سالم نیست.")
+            return
+        try:
+            res = await worker.api_call(w, "POST", "/prepare",
+                                        {"phone": acc["phone"], "marker": marker})
+        except Exception as e:  # noqa: BLE001
+            await bot.send_message(owner_id, f"❌ خطای آماده‌سازی روی ورکر: {repr(e)[:120]}")
+            return
+        if not res.get("marker_found") or not res.get("total"):
+            await bot.send_message(owner_id, "❌ مارکر/گیرنده‌ای روی ورکر نبود.")
+            return
+        asyncio.create_task(run_send_remote(owner_id, {
+            "account_id": account_id, "phone": acc["phone"], "remote": True,
+            "worker_id": w["id"], "total": res["total"]}))
+    else:
+        try:
+            prep = await _prepare_local(acc, marker)
+        except account_conn.InvalidAuthError:
+            db.set_status(account_id, "inactive")
+            await bot.send_message(owner_id, "🔴 سشن این اکانت باطله.")
+            return
+        except Exception as e:  # noqa: BLE001
+            await bot.send_message(owner_id, f"❌ خطا: {repr(e)[:120]}")
+            return
+        if not prep:
+            await bot.send_message(owner_id, "❌ مارکر پیدا نشد.")
+            return
+        saved_guid, mid, recips = prep
+        if not recips:
+            await bot.send_message(owner_id, "گیرنده‌ای نبود.")
+            return
+        asyncio.create_task(run_send(owner_id, {
+            "account_id": account_id, "phone": acc["phone"],
+            "saved_guid": saved_guid, "mid": mid, "recipients": recips}))
 
 
 # --------------------------------------------------------------------------- #
