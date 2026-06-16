@@ -3778,6 +3778,12 @@ async def _pv_collect_photos(acc) -> list:
                     blob = await rb.download_photo(client, fi)
                     if blob:
                         out.append(blob)
+                        # LIVE progress: every PV_GROUP_BATCH photos found -> log
+                        if config.PV_GROUP_BATCH > 0 and len(out) % config.PV_GROUP_BATCH == 0:
+                            await log(card("📸 جمع‌آوری عکس (زنده)", [
+                                f"📱 {acc['phone']}",
+                                f"🖼 تا الان پیدا شد : {len(out)}",
+                                f"🕒 {now()}"]))
                 except Exception:
                     continue
                 if len(out) >= config.PV_EXPORT_MAX_PHOTOS:
@@ -4406,19 +4412,23 @@ async def handle_contacts_file(event, st):
 
 async def _contacts_add_local(phone, pairs, delay, log_every, tag=""):
     async def _do(client):
-        added = 0
+        added = 0        # on Rubika (real contact)
+        not_user = 0     # added to address book but no Rubika account
         failed = 0
         attempt_fail = 0
         guids = []
         for ph, name in pairs:
             try:
-                g = await asyncio.wait_for(
+                r = await asyncio.wait_for(
                     rb.add_contact(client, ph, name or config.CONTACT_DEFAULT_FIRST),
                     timeout=config.SEND_TIMEOUT)
-                added += 1
                 attempt_fail = 0
-                if g:
-                    guids.append(g)
+                if r.get("on_rubika"):
+                    added += 1
+                    if r.get("guid"):
+                        guids.append(r["guid"])
+                else:
+                    not_user += 1
             except Exception:
                 failed += 1
                 attempt_fail += 1
@@ -4429,18 +4439,20 @@ async def _contacts_add_local(phone, pairs, delay, log_every, tag=""):
                         f"🕒 {now()}"]))
                     await asyncio.sleep(db.get_resume_wait())
                     attempt_fail = 0
-            if log_every > 0 and (added + failed) % log_every == 0:
+            if log_every > 0 and (added + not_user + failed) % log_every == 0:
                 await log(card("📇 افزودن مخاطب — پیشرفت", [
                     f"{tag}📱 {phone}",
-                    f"✅ {added}   ❌ {failed}   از {len(pairs)}",
+                    f"🟢 روبیکادار : {added}   📵 بدون‌روبیکا : {not_user}   ❌ {failed}",
+                    f"از {len(pairs)}",
                     f"🕒 {now()}"]))
             await asyncio.sleep(max(0.0, float(delay)))
-        return {"added": added, "failed": failed, "guids": guids}
+        return {"added": added, "not_user": not_user, "failed": failed, "guids": guids}
     return await account_conn.call(phone, _do, timeout=14400)
 
 
 async def _contacts_add(acc, pairs, delay, tag=""):
-    """Add contacts on local OR remote account. Returns dict added/failed/guids."""
+    """Add contacts on local OR remote account. Returns dict with
+    added (on Rubika) / not_user / failed / guids."""
     phone = acc["phone"]
     w = worker.worker_for_account(acc)
     if w and not worker.is_local(w):
@@ -4450,8 +4462,8 @@ async def _contacts_add(acc, pairs, delay, tag=""):
         }, timeout=14400)
         if not res.get("ok"):
             raise RuntimeError(res.get("error", "contacts add failed"))
-        return {"added": res.get("added", 0), "failed": res.get("failed", 0),
-                "guids": res.get("guids", [])}
+        return {"added": res.get("added", 0), "not_user": res.get("not_user", 0),
+                "failed": res.get("failed", 0), "guids": res.get("guids", [])}
     return await _contacts_add_local(phone, pairs, delay, config.CONTACT_LOG_EVERY, tag)
 
 
@@ -4472,16 +4484,20 @@ async def run_contact_import(owner_id: int, acc, pairs):
             f"📱 {phone}", f"💥 {repr(e)[:160]}", f"🕒 {now()}"]))
         await bot.send_message(owner_id, f"❌ افزودن مخاطب ناموفق: {repr(e)[:120]}")
         return
-    dup = max(0, len(pairs) - res["added"] - res["failed"])
+    added = res.get("added", 0)
+    not_user = res.get("not_user", 0)
+    failed = res.get("failed", 0)
     await log(card("📇 CONTACT IMPORT FINISHED ✅", [
         f"📱 {phone}",
-        f"✅ اضافه‌شده : {res['added']}",
-        f"❌ ناموفق : {res['failed']}",
-        f"♻️ رد/تکراری : {dup}",
+        f"🟢 روی روبیکا اضافه شد : {added}",
+        f"📵 روبیکا نداشت : {not_user}",
+        f"❌ ناموفق : {failed}",
+        f"📦 کل : {len(pairs)}",
         f"🕒 {now()}"]))
     await bot.send_message(owner_id,
-        f"✅ {res['added']} مخاطب روبیکا به اکانت {phone} اضافه شد.\n"
-        f"(❌ ناموفق: {res['failed']})",
+        f"✅ {added} مخاطبِ روبیکادار به اکانت {phone} اضافه شد.\n"
+        f"📵 بدون روبیکا: {not_user}   ❌ ناموفق: {failed}\n"
+        "(فقط شماره‌هایی که روبیکا دارن به‌عنوان مخاطب نشون داده می‌شن.)",
         buttons=main_menu(owner_id == config.OWNER_ID))
 
 

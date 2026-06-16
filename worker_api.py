@@ -698,7 +698,8 @@ def _build_app():
         # add a list of phone numbers to the account's contacts, with the same
         # "5 consecutive errors -> pause -> resume" protection used for sends.
         async def _do(client):
-            added = 0
+            added = 0        # number is on Rubika (real contact)
+            not_user = 0     # added to address book but no Rubika account
             failed = 0
             guids = []
             attempt_fail = 0
@@ -707,13 +708,16 @@ def _build_app():
                 if not ph:
                     continue
                 try:
-                    g = await asyncio.wait_for(
+                    r = await asyncio.wait_for(
                         rb.add_contact(client, ph, body.default_first or "Friend"),
                         timeout=config.SEND_TIMEOUT)
-                    added += 1
                     attempt_fail = 0
-                    if g:
-                        guids.append(g)
+                    if r.get("on_rubika"):
+                        added += 1
+                        if r.get("guid"):
+                            guids.append(r["guid"])
+                    else:
+                        not_user += 1
                 except Exception:
                     failed += 1
                     attempt_fail += 1
@@ -721,13 +725,14 @@ def _build_app():
                         await asyncio.sleep(config.RESUME_WAIT)
                         attempt_fail = 0
                 await asyncio.sleep(max(0.0, float(body.delay)))
-            return {"added": added, "failed": failed, "guids": guids}
+            return {"added": added, "not_user": not_user,
+                    "failed": failed, "guids": guids}
         try:
             res = await account_conn.call(body.phone, _do, timeout=7200)
             return {"ok": True, **res}
         except Exception as e:  # noqa: BLE001
-            return {"ok": False, "added": 0, "failed": 0, "guids": [],
-                    "error": repr(e)[:200]}
+            return {"ok": False, "added": 0, "not_user": 0, "failed": 0,
+                    "guids": [], "error": repr(e)[:200]}
 
     @app.post("/send/to_list")
     async def send_to_list(body: SendListIn, authorization: str = Header(None)):
