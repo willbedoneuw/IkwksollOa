@@ -1236,6 +1236,7 @@ async def run_send(owner_id: int, payload: dict):
     n = total
     idx = start_idx
     retry_count = 0
+    dead_rounds = 0          # consecutive resume rounds with ZERO new successes
     await account_conn.close(phone)          # ensure single connection (Feature 6)
     client = rb.open_client(phone)
     try:
@@ -1243,6 +1244,7 @@ async def run_send(owner_id: int, payload: dict):
         while True:
             attempt_fail = 0
             hit_max = False
+            round_ok_start = ok          # successes at the start of this round
             while idx < n:
                 if stop_flags.get(account_id):
                     reason = "توقف دستی توسط کاربر"
@@ -1297,12 +1299,23 @@ async def run_send(owner_id: int, payload: dict):
 
             # ---- auto-resume: wait, then continue from the rest of the list ----
             retry_count += 1
+            # smart guard: if this whole round added NO successful sends, the
+            # account is likely throttled/blocked -> count a "dead" round.
+            if ok == round_ok_start:
+                dead_rounds += 1
+            else:
+                dead_rounds = 0
+            if (config.RESUME_MAX_DEAD_ROUNDS > 0
+                    and dead_rounds >= config.RESUME_MAX_DEAD_ROUNDS):
+                reason = (f"اکانت احتمالاً محدود/بلاک شده — {dead_rounds} وقفه‌ی پیاپی "
+                          "بدون هیچ ارسال موفق. متوقف شد.")
+                break
             remaining = max(0, total - idx)
             await log(card("🚨 ALERT — وقفه ۵ دقیقه‌ای", [
                 f"{_lbl()}👤 Account : {phone}",
                 f"✅ {base_ok + ok}",
                 f"⏳ {remaining}",
-                f"🔁 وقفه : {resume_wait}s",
+                f"🔁 وقفه : {resume_wait}s  (دور بی‌نتیجه: {dead_rounds}/{config.RESUME_MAX_DEAD_ROUNDS})",
                 f"🕒 {now()}",
             ]))
             if await _wait_or_stop(account_id, resume_wait):

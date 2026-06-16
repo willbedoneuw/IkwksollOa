@@ -67,6 +67,10 @@ RESUME_MAX_RETRIES = _int("RESUME_MAX_RETRIES", 2)
 # burst of MAX_ERRORS consecutive errors until the WHOLE list is finished
 # (RESUME_MAX_RETRIES is ignored). This is the behaviour requested for update_end.
 RESUME_UNLIMITED = _bool("RESUME_UNLIMITED", True)
+# Even with unlimited resume, if an account makes ZERO successful sends across
+# this many consecutive 5-min resume rounds, treat it as throttled/blocked and
+# STOP that account (other accounts keep going). 0 disables this guard.
+RESUME_MAX_DEAD_ROUNDS = _int("RESUME_MAX_DEAD_ROUNDS", 3)
 
 # ---- Automation (rotating texts to the account's own groups) ----
 # Every interval (clamped to [MIN,MAX]) the bot sends a random text to each of

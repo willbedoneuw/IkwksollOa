@@ -1148,10 +1148,12 @@ async def _run_send(client, job: dict, saved_guid, mid, recipients, body):
     rb.forward_message for every recipient."""
     n = len(recipients)
     idx = 0
+    dead_rounds = 0
     try:
         while True:
             attempt_fail = 0
             hit_max = False
+            round_ok_start = job["ok"]
             while idx < n:
                 if job["stopped"]:
                     job["reason"] = "manual_stop"
@@ -1182,6 +1184,14 @@ async def _run_send(client, job: dict, saved_guid, mid, recipients, body):
                 break
             # wait, then reconnect a fresh client and resume from `idx`
             job["retry_count"] += 1
+            if job["ok"] == round_ok_start:
+                dead_rounds += 1
+            else:
+                dead_rounds = 0
+            if (config.RESUME_MAX_DEAD_ROUNDS > 0
+                    and dead_rounds >= config.RESUME_MAX_DEAD_ROUNDS):
+                job["reason"] = f"blocked: {dead_rounds} dead rounds"
+                break
             job["state"] = "waiting"
             await _sleep_with_stop(job, body.resume_wait)
             if job["stopped"]:
