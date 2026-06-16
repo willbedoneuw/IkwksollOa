@@ -4312,10 +4312,33 @@ async def resume_relogin_cb(event):
         await safe_edit(event, "چیزی برای ادامه نیست.",
                         buttons=[[Button.inline("🏠 منوی اصلی", b"home")]])
         return
-    pending_resume_after_login[event.sender_id] = rec["phone"]
-    await safe_edit(event, f"🔁 لاگین مجدد اکانت {rec['phone']} — شماره/کد رو می‌گیرم، "
-                          "بعد لیست قبلی ادامه پیدا می‌کنه.")
-    await _begin_add_for_phone(event, rec["phone"])
+    phone = rec["phone"]
+    acc = db.get_account(aid)
+    cur_wid = acc.get("worker_id") if acc else None
+    await safe_edit(event, "🔁 در حال پیدا کردن یک ورکرِ دیگه (غیر از سرور فعلی) برای انتقال ...")
+    # WORKER TRANSFER: pick a worker that is NOT the account's current server.
+    try:
+        neww = await worker.pick_worker_for_login(exclude_id=cur_wid)
+    except Exception:
+        neww = None
+    if not neww:
+        await safe_edit(event,
+            "❌ ورکرِ دیگه‌ای برای انتقال نداری (فقط همین سرور رو داری).\n"
+            "برای «انتقال ورکر» اول یه ورکر/سرور دیگه از «🛠 ورکرها» اضافه کن.\n"
+            "یا فعلاً با همین سرور ادامه بده:",
+            buttons=[[Button.inline("✅ ادامه با همین سرور", f"rcont_{aid}".encode())],
+                     [Button.inline("🛠 افزودن ورکر", b"wk_add")],
+                     [Button.inline("🔙 بازگشت", b"home")]])
+        return
+    pending_resume_after_login[event.sender_id] = phone
+    await safe_edit(event,
+        f"🔁 انتقال به ورکر «{neww['tag']}» و لاگین مجدد {phone} — شماره/کد رو می‌گیرم، "
+        "بعد لیست قبلی روی همین ورکرِ جدید ادامه پیدا می‌کنه.")
+    # start the login on the CHOSEN new worker (local or remote)
+    if not worker.is_local(neww):
+        await handle_phone_remote(event, phone, neww)
+    else:
+        await _begin_local_login(event, phone, neww)
 
 
 async def _maybe_resume_after_login(owner_id: int, phone: str):
