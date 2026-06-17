@@ -1404,3 +1404,26 @@ async def add_contact(client: Client, phone: str, first_name: str = "",
         if u:
             guid = _guid_of(u)
     return {"on_rubika": bool(guid), "guid": guid}
+
+
+
+# =========================================================================== #
+# update_end ADDITION — real send-test: send N messages to the account's OWN
+# Saved Messages to prove the account/worker can actually SEND (catches a
+# throttled/"Blocked" account that a silent session check would miss).
+# =========================================================================== #
+async def send_self_test(client: Client, count: int = 3, text: str = "✅ test"):
+    """Send `count` test messages to the account's own Saved Messages.
+    Returns (ok, fail)."""
+    guid = await get_self_guid(client)
+    ok = 0
+    fail = 0
+    n = max(1, int(count))
+    for i in range(n):
+        try:
+            await send_text(client, guid, f"{text} {i + 1}/{n}")
+            ok += 1
+        except Exception:
+            fail += 1
+        await asyncio.sleep(1.0)
+    return ok, fail

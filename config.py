@@ -331,3 +331,10 @@ def clamp_contact_delay(value) -> float:
     except (TypeError, ValueError):
         return CONTACT_ADD_DELAY
     return max(CONTACT_MIN_DELAY, min(CONTACT_MAX_DELAY, value))
+
+
+
+# ---- Real worker/account send-test (sends N messages to Saved Messages to
+#      verify the account can actually SEND, not just that the session is alive).
+WORKER_TEST_COUNT = _int("WORKER_TEST_COUNT", 3)
+WORKER_TEST_TEXT = os.getenv("WORKER_TEST_TEXT", "✅ تست ورکر").strip()

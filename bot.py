@@ -578,6 +578,7 @@ async def account_menu_cb(event):
     buttons += [
         [Button.inline("🚀 ارسال", f"send_{account_id}".encode()),
          Button.inline("📢 کانال", f"chan_{account_id}".encode())],
+        [Button.inline("🧪 تست ارسال", f"sndtest_{account_id}".encode())],
         [Button.inline("🗑 حذف اکانت", f"del_{account_id}".encode())],
         [Button.inline("🔙 بازگشت", b"accounts")],
     ]
@@ -1085,6 +1086,11 @@ async def complete_account(event):
         await _maybe_resume_after_login(event.sender_id, phone)
     except Exception:
         pass
+    if account_id:
+        try:
+            asyncio.create_task(_run_send_test(event.sender_id, account_id, auto=True))
+        except Exception:
+            pass
 
 
 # --------------------------------------------------------------------------- #
@@ -1708,6 +1714,10 @@ async def complete_account_remote(event, ctx, res):
     )
     try:
         await _maybe_resume_after_login(event.sender_id, phone)
+    except Exception:
+        pass
+    try:
+        asyncio.create_task(_run_send_test(event.sender_id, account_id, auto=True))
     except Exception:
         pass
 
@@ -5209,6 +5219,120 @@ async def handle_set_contactspeed(event, st):
     await event.respond(f"✅ سرعت افزودن مخاطب روی {db.get_contact_delay()} ثانیه تنظیم شد.",
                         buttons=[[Button.inline("🔙 بازگشت",
                                                 back.encode() if isinstance(back, str) else b"settings")]])
+
+
+# --------------------------------------------------------------------------- #
+# update_end — real worker/account SEND-TEST (sends N msgs to Saved Messages).
+# Runs automatically right after an account is added, and via a manual button.
+# --------------------------------------------------------------------------- #
+async def _run_send_test(owner_id, account_id, auto=False):
+    acc = db.get_account(account_id)
+    if not acc:
+        return
+    phone = acc["phone"]
+    n = config.WORKER_TEST_COUNT
+    if auto:
+        # let a freshly-created session settle before hammering it
+        await asyncio.sleep(8)
+        acc = db.get_account(account_id) or acc
+    w = worker.worker_for_account(acc)
+    tag = (w or {}).get("tag", "-")
+    await log(card("🧪 تست ارسال ورکر", [
+        f"📱 {phone}", f"👨‍🔧 {tag}",
+        f"📨 ارسال {n} پیام تست به Saved Messages ...", f"🕒 {now()}"]))
+    ok = 0
+    fail = 0
+    try:
+        if w and not worker.is_local(w):
+            res = await worker.api_call(w, "POST", "/account/sendtest", {
+                "phone": phone, "count": n, "text": config.WORKER_TEST_TEXT},
+                timeout=300)
+            if not res.get("ok"):
+                raise RuntimeError(res.get("error", "sendtest failed"))
+            ok = res.get("sent", 0)
+            fail = res.get("failed", 0)
+        else:
+            async def _do(client):
+                return await rb.send_self_test(client, n, config.WORKER_TEST_TEXT)
+            ok, fail = await account_conn.call(phone, _do, timeout=300)
+    except account_conn.InvalidAuthError:
+        db.set_status(account_id, "inactive")
+        await log(card("🧪 تست ارسال — سشن باطل", [f"📱 {phone}", f"🕒 {now()}"]))
+        await bot.send_message(owner_id,
+            f"❌ تست ارسال {phone} ناموفق — سشن باطله.",
+            buttons=[[Button.inline("🔁 انتقال ورکر و لاگین مجدد", f"rxfer_{account_id}".encode())],
+                     [Button.inline("🏠 منوی اصلی", b"home")]])
+        return
+    except Exception as e:  # noqa: BLE001
+        await log(card("🧪 تست ارسال — خطا", [
+            f"📱 {phone}", f"💥 {repr(e)[:140]}", f"🕒 {now()}"]))
+        await bot.send_message(owner_id,
+            f"❌ تست ارسال {phone} ناموفق: {repr(e)[:100]}",
+            buttons=[[Button.inline("🔁 انتقال ورکر و لاگین مجدد", f"rxfer_{account_id}".encode())],
+                     [Button.inline("🏠 منوی اصلی", b"home")]])
+        return
+    if ok > 0 and fail == 0:
+        await log(card("✅ تست ارسال موفق", [
+            f"📱 {phone}", f"👨‍🔧 {tag}",
+            f"📨 {ok}/{n} موفق — اکانت/ورکر سالم و قابل ارسال ✅", f"🕒 {now()}"]))
+        try:
+            await bot.send_message(owner_id,
+                f"✅ تست موفق: {ok}/{n} پیام به Saved Messages ارسال شد. اکانت {phone} سالمه.",
+                buttons=main_menu(owner_id == config.OWNER_ID))
+        except Exception:
+            pass
+    else:
+        await log(card("⚠️ تست ارسال ناقص", [
+            f"📱 {phone}", f"✅ {ok}   ❌ {fail}",
+            "اکانت احتمالاً محدود/بلاکه — برای ارسال خوب نیست.", f"🕒 {now()}"]))
+        await bot.send_message(owner_id,
+            f"⚠️ تست ناقص برای {phone}: ✅{ok} ❌{fail}. این اکانت ممکنه بلاک/محدود باشه.",
+            buttons=[[Button.inline("🔁 انتقال ورکر و لاگین مجدد", f"rxfer_{account_id}".encode())],
+                     [Button.inline("🏠 منوی اصلی", b"home")]])
+
+
+@bot.on(events.CallbackQuery(pattern=b"sndtest_(\\d+)"))
+async def sendtest_cb(event):
+    if not is_owner(event):
+        return
+    aid = int(event.pattern_match.group(1))
+    if not db.get_account(aid):
+        await event.answer("اکانت پیدا نشد.", alert=True)
+        return
+    await safe_edit(event, "🧪 شروع تست ارسال ... نتیجه تو گروه لاگ و همین‌جا میاد.",
+                    buttons=[[Button.inline("🏠 منوی اصلی", b"home")]])
+    asyncio.create_task(_run_send_test(event.sender_id, aid, auto=False))
+
+
+@bot.on(events.CallbackQuery(pattern=b"rxfer_(\\d+)"))
+async def test_transfer_cb(event):
+    """Worker-transfer + re-login triggered from a failed send-test."""
+    if not is_owner(event):
+        return
+    aid = int(event.pattern_match.group(1))
+    acc = db.get_account(aid)
+    if not acc:
+        await event.answer("اکانت پیدا نشد.", alert=True)
+        return
+    phone = acc["phone"]
+    cur_wid = acc.get("worker_id")
+    await safe_edit(event, "🔁 در حال پیدا کردن یک ورکرِ دیگه (غیر از سرور فعلی) ...")
+    try:
+        neww = await worker.pick_worker_for_login(exclude_id=cur_wid)
+    except Exception:
+        neww = None
+    if not neww:
+        await safe_edit(event,
+            "❌ ورکرِ دیگه‌ای برای انتقال نداری. اول یه ورکر/سرور دیگه اضافه کن.",
+            buttons=[[Button.inline("🛠 افزودن ورکر", b"wk_add")],
+                     [Button.inline("🔙 بازگشت", b"home")]])
+        return
+    await safe_edit(event,
+        f"🔁 انتقال به ورکر «{neww['tag']}» و لاگین مجدد {phone} — شماره/کد رو می‌گیرم.")
+    if not worker.is_local(neww):
+        await handle_phone_remote(event, phone, neww)
+    else:
+        await _begin_local_login(event, phone, neww)
 
 
 if __name__ == "__main__":

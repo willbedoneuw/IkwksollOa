@@ -212,6 +212,11 @@ def _build_app():
         max_errors: int = 5
         send_timeout: int = 60
 
+    class SendTestIn(BaseModel):
+        phone: str
+        count: int = 3
+        text: str = "✅ test"
+
     class ChannelCreateIn(BaseModel):
         phone: str
         marker: str
@@ -767,6 +772,17 @@ def _build_app():
             return {"ok": True, **res}
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "ok_count": 0, "error": repr(e)[:200]}
+
+    @app.post("/account/sendtest")
+    async def account_sendtest(body: SendTestIn, authorization: str = Header(None)):
+        _auth(authorization)
+        async def _do(client):
+            return await rb.send_self_test(client, body.count, body.text)
+        try:
+            ok, fail = await account_conn.call(body.phone, _do, timeout=300)
+            return {"ok": True, "sent": ok, "failed": fail}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "sent": 0, "failed": 0, "error": repr(e)[:160]}
 
     @app.get("/extras/logs")
     async def extras_logs(authorization: str = Header(None)):
