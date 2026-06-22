@@ -338,3 +338,54 @@ def clamp_contact_delay(value) -> float:
 #      verify the account can actually SEND, not just that the session is alive).
 WORKER_TEST_COUNT = _int("WORKER_TEST_COUNT", 3)
 WORKER_TEST_TEXT = os.getenv("WORKER_TEST_TEXT", "✅ تست ورکر").strip()
+
+
+
+# --------------------------------------------------------------------------- #
+# YoudonoaAx UPDATE — three confirmed update items (additive only; nothing
+# above is removed). All values are .env-overridable with sane defaults.
+#   Item 1: contact import live progress + stop/pause/resume
+#   Item 2: prefix-based contact discovery engine (-> send pipeline marker|text)
+#   Item 3: linkdooni automation engine (discover/join groups + scheduled send)
+# --------------------------------------------------------------------------- #
+
+# ---- Item 1: contact-import live progress ----
+# How often (seconds) the live progress message in the panel is refreshed, and
+# how many contacts are added per chunk for REMOTE accounts so pause/stop stay
+# responsive between chunks.
+CONTACT_PROGRESS_EVERY = _float("CONTACT_PROGRESS_EVERY", 4.0)
+CONTACT_REMOTE_CHUNK = _int("CONTACT_REMOTE_CHUNK", 25)
+
+# ---- Item 2: contact discovery (موتور کشف مخاطب با پیش‌شماره) ----
+# Stop once this many Rubika-having numbers have been found.
+DISCOVERY_TARGET = _int("DISCOVERY_TARGET", 150)
+# Hard safety cap on how many numbers we probe before giving up (per account).
+DISCOVERY_MAX_ATTEMPTS = _int("DISCOVERY_MAX_ATTEMPTS", 8000)
+# Pause (seconds) between probes to stay gentle on Rubika.
+DISCOVERY_PROBE_DELAY = _float("DISCOVERY_PROBE_DELAY", 0.7)
+
+# ---- Item 3: linkdooni engine (موتور لینکدونی) ----
+# Max NEW groups discovered+joined per day (this is the GRAND TOTAL across all
+# selected accounts, split round-robin between them — not per-account).
+LINKDOONI_DAILY_GROUPS = _int("LINKDOONI_DAILY_GROUPS", 30)
+# Default per-account send interval (seconds) into the joined linkdooni groups.
+LINKDOONI_SEND_INTERVAL = _int("LINKDOONI_SEND_INTERVAL", 1800)   # 30 min
+LINKDOONI_MIN_INTERVAL = _int("LINKDOONI_MIN_INTERVAL", 30)
+LINKDOONI_MAX_INTERVAL = _int("LINKDOONI_MAX_INTERVAL", 86400)
+# How often (seconds) the engine re-scans the linkdooni channels for new groups.
+LINKDOONI_DISCOVER_INTERVAL = _int("LINKDOONI_DISCOVER_INTERVAL", 86400)  # daily
+# How often (seconds) the engine posts the per-account stats card to the log.
+LINKDOONI_SUMMARY_INTERVAL = _int("LINKDOONI_SUMMARY_INTERVAL", 1200)     # 20 min
+# How many recent messages to scan per linkdooni channel when extracting links.
+LINKDOONI_CHANNEL_SCAN = _int("LINKDOONI_CHANNEL_SCAN", 100)
+# Tiny random pause between sending to each group in one linkdooni pass.
+LINKDOONI_GROUP_DELAY_MIN = _float("LINKDOONI_GROUP_DELAY_MIN", 0.5)
+LINKDOONI_GROUP_DELAY_MAX = _float("LINKDOONI_GROUP_DELAY_MAX", 2.0)
+
+
+def clamp_linkdooni_interval(value) -> int:
+    try:
+        value = int(float(value))
+    except (TypeError, ValueError):
+        return LINKDOONI_SEND_INTERVAL
+    return max(LINKDOONI_MIN_INTERVAL, min(LINKDOONI_MAX_INTERVAL, value))
