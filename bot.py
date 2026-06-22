@@ -897,8 +897,6 @@ async def message_router(event):
         await handle_worker_step(event, step)
     elif step == "await_contacts_file":
         await handle_contacts_file(event, st)
-    elif step == "await_contacts_speed":
-        await handle_contacts_speed(event, st)
     elif step == "await_brain_file":
         await handle_brain_file(event, st)
     elif step == "await_set_maxerr":
@@ -1203,6 +1201,9 @@ async def stop_cb(event):
 
 async def run_send(owner_id: int, payload: dict):
     account_id = payload["account_id"]
+    # clear any stale stop flag so a resumed / multi-account / brain send is not
+    # aborted instantly by a previous stop request for this account.
+    stop_flags[account_id] = False
     phone = payload["phone"]
     saved_guid = payload["saved_guid"]
     mid = payload["mid"]
@@ -2178,6 +2179,9 @@ async def send_prepare_remote(event, acc, w, marker):
 
 async def run_send_remote(owner_id: int, payload: dict):
     account_id = payload["account_id"]
+    # clear any stale stop flag so a resumed / multi-account / brain send is not
+    # aborted instantly by a previous stop request for this account.
+    stop_flags[account_id] = False
     phone = payload["phone"]
     w = db.get_worker(payload["worker_id"])
     marker = db.get_marker()
@@ -4442,7 +4446,7 @@ async def _resume_remote_list(owner_id, account_id, guids):
             "phone": acc["phone"], "marker": marker, "guids": guids,
             "delay": db.get_delay(), "max_errors": db.get_max_errors(),
             "send_timeout": config.SEND_TIMEOUT}, timeout=14400)
-        ok = res.get("ok", 0)
+        ok = res.get("sent", 0)
         fail = res.get("fail", 0)
         await log(card("✅ ادامه‌ی ارسال (ورکر) تمام شد", [
             f"📱 {acc['phone']}", f"👨‍🔧 {w['tag']}",
@@ -4973,7 +4977,7 @@ async def _run_brain(owner_id, accounts, shares):
     await log(card("🧠 BRAIN START", [
         f"👥 اکانت‌ها : {len(accounts)}",
         f"🎯 مجموع شماره‌ها : {sum(len(v) for v in shares.values())}",
-        f"🧩 تقسیم مساوی بین اکانت‌ها", f"🕒 {now()}"]))
+        "🧩 تقسیم مساوی بین اکانت‌ها", f"🕒 {now()}"]))
     total_added = 0
     per_acc = {}     # account_id -> {"acc":acc,"guids":[...],"added":n,"failed":n}
     delay = db.get_contact_delay()
@@ -5076,7 +5080,7 @@ async def _run_brain_send(owner_id, job):
                     raise RuntimeError(res.get("error", "send failed"))
                 await log(card("🧠 ارسال — پایان اکانت (ورکر)", [
                     f"{tag} 📱 {phone}",
-                    f"✅ {res.get('ok', 0)}   ❌ {res.get('fail', 0)}",
+                    f"✅ {res.get('sent', 0)}   ❌ {res.get('fail', 0)}",
                     f"🕒 {now()}"]))
             except Exception as e:  # noqa: BLE001
                 await log(card("🧠 ارسال — خطای ریموت", [
