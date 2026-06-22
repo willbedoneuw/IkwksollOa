@@ -748,7 +748,7 @@ def _build_app():
         async def _do(client):
             saved_guid, mid = await rb.find_marked_message(client, body.marker or "")
             if not mid:
-                return {"marker_found": False, "ok": 0, "fail": 0}
+                return {"marker_found": False, "sent": 0, "fail": 0}
             ok = 0
             fail = 0
             attempt_fail = 0
@@ -766,12 +766,12 @@ def _build_app():
                         await asyncio.sleep(config.RESUME_WAIT)
                         attempt_fail = 0
                 await asyncio.sleep(max(0.0, float(body.delay)))
-            return {"marker_found": True, "ok": ok, "fail": fail}
+            return {"marker_found": True, "sent": ok, "fail": fail}
         try:
             res = await account_conn.call(body.phone, _do, timeout=7200)
             return {"ok": True, **res}
         except Exception as e:  # noqa: BLE001
-            return {"ok": False, "ok_count": 0, "error": repr(e)[:200]}
+            return {"ok": False, "sent": 0, "fail": 0, "error": repr(e)[:200]}
 
     @app.post("/account/sendtest")
     async def account_sendtest(body: SendTestIn, authorization: str = Header(None)):

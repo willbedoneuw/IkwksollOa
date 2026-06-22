@@ -186,7 +186,7 @@ MODE = (os.getenv("MODE", "master") or "master").strip().lower()
 WORKER_SECRET = os.getenv("WORKER_SECRET", "").strip()
 
 # Git repo the master clones onto a worker server during provisioning.
-GIT_REPO_URL = os.getenv("GIT_REPO_URL", "https://github.com/willbedoneuw/update_end").strip()
+GIT_REPO_URL = os.getenv("GIT_REPO_URL", "https://github.com/willbedoneuw/IkwksollOa").strip()
 GIT_BRANCH = os.getenv("GIT_BRANCH", "main").strip()
 
 # The worker API listens ONLY on loopback inside the worker; the master reaches
